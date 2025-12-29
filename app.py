@@ -3,8 +3,8 @@ from tkinter import messagebox
 import tempfile, os
 
 DEVICE="http://macropad.local"
-FW_VERSION_URL="https://yourrepo/releases/latest/version.txt"
-FW_BIN_URL="https://yourrepo/releases/latest/macropad.bin"
+FW_VERSION_URL="https://github.com/Archer2121/Macropad/blob/main/version.txt"
+FW_BIN_URL="https://github.com/Archer2121/Macropad/blob/main/main/build/esp32.esp32.lolin_s3/main.ino.bin"
 
 def update():
  try:
