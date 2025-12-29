@@ -1,163 +1,145 @@
-import requests
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk, messagebox
+import requests
+import threading
 import serial.tools.list_ports
 import subprocess
-import tempfile
 import os
-import threading
-
-# ================= CONFIG =================
-DEVICE_URL = "http://macropad.local"
 
 FW_VERSION_URL = "https://raw.githubusercontent.com/Archer2121/Macropad/main/version.txt"
 FW_BIN_URL = "https://raw.githubusercontent.com/Archer2121/Macropad/main/main/build/esp32.esp32.lolin_s3/main.ino.bin"
 
-BAUDRATE = "460800"
+BIN_FILE = "macropad_firmware.bin"
 
-# ================= UI SETUP =================
-root = tk.Tk()
-root.title("ESP32 Macropad Updater")
-root.geometry("420x360")
 
-tk.Label(root, text="ESP32 Macropad Firmware Updater", font=("Arial", 12, "bold")).pack(pady=10)
+# ---------------- DEVICE DISCOVERY ----------------
 
-progress = ttk.Progressbar(root, length=360, mode="determinate")
-progress.pack(pady=10)
-
-status = tk.Label(root, text="Idle")
-status.pack()
-
-def set_progress(val, text=None):
-    progress["value"] = val
-    if text:
-        status.config(text=text)
-    root.update_idletasks()
-
-# ================= SERIAL PORTS =================
-port_var = tk.StringVar()
-port_menu = tk.OptionMenu(root, port_var, "")
-port_menu.pack(pady=5)
-
-def refresh_ports():
-    ports = serial.tools.list_ports.comports()
-    menu = port_menu["menu"]
-    menu.delete(0, "end")
-    for p in ports:
-        menu.add_command(label=p.device, command=lambda v=p.device: port_var.set(v))
-    if ports:
-        port_var.set(ports[0].device)
-
-tk.Button(root, text="Refresh COM Ports", command=refresh_ports).pack()
-
-# ================= OTA UPDATE =================
-def ota_update():
-    def task():
+def find_device():
+    for i in range(1, 255):
+        ip = f"192.168.1.{i}"
         try:
-            set_progress(0, "Checking firmware version...")
+            r = requests.get(f"http://{ip}/version", timeout=0.25)
+            if r.status_code == 200:
+                return ip
+        except:
+            pass
+    return None
 
-            local = requests.get(DEVICE_URL + "/version", timeout=3).text.strip()
-            remote = requests.get(FW_VERSION_URL, timeout=3).text.strip()
 
-            if local == remote:
-                set_progress(0, "Firmware already up to date")
-                messagebox.showinfo("Up to date", f"Version {local}")
-                return
+# ---------------- GUI APP ----------------
 
-            if not messagebox.askyesno(
-                "Update Available",
-                f"Installed: {local}\nLatest: {remote}\n\nInstall update?"
-            ):
-                return
+class MacropadApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Macropad Firmware Updater")
+        self.geometry("420x260")
+        self.resizable(False, False)
 
-            # Download firmware
-            set_progress(5, "Downloading firmware...")
-            r = requests.get(FW_BIN_URL, stream=True)
-            total = int(r.headers.get("Content-Length", 1))
-            downloaded = 0
+        self.status = tk.StringVar(value="Idle")
+        self.progress = tk.IntVar(value=0)
 
-            fw_path = os.path.join(tempfile.gettempdir(), "macropad.bin")
-            with open(fw_path, "wb") as f:
-                for chunk in r.iter_content(4096):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        pct = 5 + int(45 * downloaded / total)
-                        set_progress(pct)
+        ttk.Label(self, text="Macropad Updater", font=("Segoe UI", 14)).pack(pady=10)
 
-            # Upload OTA
-            set_progress(55, "Uploading OTA...")
-            with open(fw_path, "rb") as fw:
-                requests.post(
-                    DEVICE_URL + "/update",
-                    files={"firmware": fw},
-                    timeout=30
-                )
+        self.progressbar = ttk.Progressbar(self, length=360, variable=self.progress)
+        self.progressbar.pack(pady=10)
 
-            set_progress(100, "OTA update complete")
-            messagebox.showinfo("Success", "Firmware updated successfully\nDevice rebooting")
+        ttk.Label(self, textvariable=self.status).pack()
 
-        except Exception as e:
-            set_progress(0, "OTA error")
-            messagebox.showerror("OTA Error", str(e))
+        ttk.Button(self, text="Update via Wi-Fi (OTA)", command=self.ota_wifi).pack(pady=5)
+        ttk.Button(self, text="Update via USB (COM)", command=self.ota_usb).pack(pady=5)
 
-    threading.Thread(target=task, daemon=True).start()
+        self.combobox = ttk.Combobox(self, state="readonly")
+        self.combobox.pack(pady=5)
+        self.refresh_ports()
 
-# ================= SERIAL UPDATE =================
-def serial_update():
-    def task():
-        port = port_var.get()
+        ttk.Button(self, text="Refresh COM Ports", command=self.refresh_ports).pack(pady=5)
+
+    # ---------------- HELPERS ----------------
+
+    def set_status(self, msg):
+        self.status.set(msg)
+        self.update_idletasks()
+
+    def download_firmware(self):
+        self.set_status("Downloading firmware...")
+        self.progress.set(0)
+
+        r = requests.get(FW_BIN_URL, stream=True)
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
+
+        with open(BIN_FILE, "wb") as f:
+            for chunk in r.iter_content(1024):
+                f.write(chunk)
+                downloaded += len(chunk)
+                self.progress.set(int((downloaded / total) * 100))
+                self.update_idletasks()
+
+    # ---------------- OTA WIFI ----------------
+
+    def ota_wifi(self):
+        threading.Thread(target=self._ota_wifi).start()
+
+    def _ota_wifi(self):
+        self.set_status("Searching for Macropad...")
+        ip = find_device()
+        if not ip:
+            messagebox.showerror("Not Found", "Macropad not found on Wi-Fi")
+            return
+
+        self.set_status(f"Found {ip}, triggering OTA...")
+        try:
+            requests.get(f"http://{ip}/ota", timeout=2)
+            self.set_status("OTA triggered — upload via Arduino OTA")
+            messagebox.showinfo(
+                "OTA Ready",
+                "Device rebooted into OTA mode.\n\nUpload firmware using Arduino OTA or next OTA cycle."
+            )
+        except:
+            messagebox.showerror("Error", "Failed to trigger OTA")
+
+    # ---------------- OTA USB ----------------
+
+    def refresh_ports(self):
+        ports = serial.tools.list_ports.comports()
+        self.combobox["values"] = [p.device for p in ports]
+        if ports:
+            self.combobox.current(0)
+
+    def ota_usb(self):
+        threading.Thread(target=self._ota_usb).start()
+
+    def _ota_usb(self):
+        port = self.combobox.get()
         if not port:
             messagebox.showerror("Error", "No COM port selected")
             return
 
+        self.download_firmware()
+        self.set_status("Flashing firmware via USB...")
+
         try:
-            set_progress(0, "Downloading firmware...")
-            r = requests.get(FW_BIN_URL)
-            fw_path = os.path.join(tempfile.gettempdir(), "macropad.bin")
-            open(fw_path, "wb").write(r.content)
-
-            set_progress(10, "Flashing via serial...")
-
-            cmd = [
-                "esptool.py",
+            subprocess.run([
+                "esptool",
                 "--chip", "esp32s3",
                 "--port", port,
-                "--baud", BAUDRATE,
-                "write_flash",
-                "-z",
-                "0x0",
-                fw_path
-            ]
+                "--baud", "460800",
+                "write_flash", "0x0", BIN_FILE
+            ], check=True)
 
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
+            self.progress.set(100)
+            self.set_status("Update complete")
+            messagebox.showinfo("Success", "Firmware update complete!")
 
-            for line in proc.stdout:
-                if "%" in line:
-                    try:
-                        pct = int(line.strip().split("%")[0].split()[-1])
-                        set_progress(10 + int(pct * 0.9), f"Flashing {pct}%")
-                    except:
-                        pass
+        except subprocess.CalledProcessError:
+            messagebox.showerror("Error", "Flashing failed")
 
-            proc.wait()
-            set_progress(100, "Serial flash complete")
-            messagebox.showinfo("Success", "Firmware flashed via USB")
+        finally:
+            if os.path.exists(BIN_FILE):
+                os.remove(BIN_FILE)
 
-        except Exception as e:
-            set_progress(0, "Serial error")
-            messagebox.showerror("Serial Error", str(e))
 
-    threading.Thread(target=task, daemon=True).start()
+# ---------------- RUN ----------------
 
-# ================= BUTTONS =================
-tk.Button(root, text="OTA Update (Wi-Fi)", command=ota_update).pack(pady=8)
-tk.Button(root, text="Flash via COM Port (USB)", command=serial_update).pack(pady=5)
-
-refresh_ports()
-root.mainloop()
+if __name__ == "__main__":
+    MacropadApp().mainloop()
